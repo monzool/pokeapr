@@ -5,16 +5,69 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::post,
 };
+use chrono::{DateTime, Duration, Utc};
+use firestore::{FirestoreDb, FirestoreDbOptions};
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, pin::Pin};
 use tracing::{error, info, warn};
 
+/// A no-op token source for use with the Firestore emulator.
+///
+/// The emulator accepts any Bearer token without validation; this lets us skip
+/// the normal credential look-up that gcloud-sdk performs on startup.
+struct EmulatorTokenSource;
+
+impl gcloud_sdk::Source for EmulatorTokenSource {
+    fn token<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> Pin<Box<dyn std::future::Future<Output = gcloud_sdk::error::Result<gcloud_sdk::Token>> + Send + 'async_trait>>
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+    {
+        Box::pin(async {
+            // The Firestore emulator validates JWT *format* but does NOT verify signatures.
+            // Segments (base64url-encoded):
+            //   {"alg":"RS256","typ":"JWT"} . {"sub":"emulator","exp":9999999999} . <fake sig>
+            const FAKE_JWT: &str = concat!(
+                "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9",
+                ".",
+                "eyJzdWIiOiJlbXVsYXRvciIsImV4cCI6OTk5OTk5OTk5OX0",
+                ".",
+                "AAAA"
+            );
+            Ok(gcloud_sdk::Token::new(
+                "Bearer".to_string(),
+                gcloud_sdk::SecretValue::from(FAKE_JWT),
+                Utc::now() + Duration::hours(24),
+            ))
+        })
+    }
+}
+
 type HmacSha256 = Hmac<Sha256>;
+
+const GITHUB_EVENTS_COLLECTION: &str = "github_events";
+
+/// Persisted representation of a GitHub webhook event.
+#[derive(Debug, Serialize, Deserialize)]
+struct GitHubEventRecord {
+    event_type: String,
+    action: Option<String>,
+    repo: Option<String>,
+    author: Option<String>,
+    title: Option<String>,
+    /// Stored as a native Firestore Timestamp in the database.
+    #[serde(with = "firestore::serialize_as_timestamp")]
+    timestamp: DateTime<Utc>,
+}
 
 #[derive(Clone)]
 struct AppState {
     webhook_secret: String,
+    db: FirestoreDb,
 }
 
 #[tokio::main]
@@ -29,12 +82,30 @@ async fn main() {
     let webhook_secret =
         env::var("GITHUB_WEBHOOK_SECRET").expect("GITHUB_WEBHOOK_SECRET must be set");
 
+    let project_id =
+        env::var("GOOGLE_CLOUD_PROJECT").expect("GOOGLE_CLOUD_PROJECT must be set");
+
     let port: u16 = env::var("WEBHOOK_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
 
-    let state = AppState { webhook_secret };
+    let db = if env::var("FIRESTORE_EMULATOR_HOST").is_ok() {
+        info!("FIRESTORE_EMULATOR_HOST set — connecting to emulator with fake token source");
+        FirestoreDb::with_options_token_source(
+            FirestoreDbOptions::new(project_id.to_string()),
+            gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
+            gcloud_sdk::TokenSourceType::ExternalSource(Box::new(EmulatorTokenSource)),
+        )
+        .await
+        .expect("Failed to create Firestore emulator client")
+    } else {
+        FirestoreDb::new(&project_id)
+            .await
+            .expect("Failed to create Firestore client")
+    };
+
+    let state = AppState { webhook_secret, db };
 
     let app = Router::new()
         .route("/webhook", post(handle_webhook))
@@ -72,6 +143,13 @@ async fn handle_webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
+    // Use delivery GUID as the document ID — prevents duplicate writes on retry
+    let delivery_id = headers
+        .get("X-GitHub-Delivery")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_owned();
+
     // Parse body into a generic JSON value for now
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
         error!("Failed to parse JSON body: {e}");
@@ -80,7 +158,40 @@ async fn handle_webhook(
 
     log_event(event_type, &payload);
 
+    let record = extract_event_record(event_type, &payload);
+
+    let _: GitHubEventRecord = state
+        .db
+        .fluent()
+        .insert()
+        .into(GITHUB_EVENTS_COLLECTION)
+        .document_id(&delivery_id)
+        .object(&record)
+        .execute()
+        .await
+        .map_err(|e| {
+            error!("Failed to write to Firestore: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    info!(
+        delivery_id,
+        event_type = record.event_type,
+        "Event persisted to Firestore"
+    );
+
     Ok(StatusCode::OK)
+}
+
+fn extract_event_record(event_type: &str, payload: &serde_json::Value) -> GitHubEventRecord {
+    GitHubEventRecord {
+        event_type: event_type.to_owned(),
+        action: payload["action"].as_str().map(str::to_owned),
+        repo: payload["repository"]["full_name"].as_str().map(str::to_owned),
+        author: payload["sender"]["login"].as_str().map(str::to_owned),
+        title: payload["pull_request"]["title"].as_str().map(str::to_owned),
+        timestamp: Utc::now(),
+    }
 }
 
 /// Verifies the GitHub webhook signature.
@@ -100,7 +211,7 @@ fn log_event(event_type: &str, payload: &serde_json::Value) {
     match event_type {
         "pull_request" => {
             let action = payload["action"].as_str().unwrap_or("unknown");
-            let number = payload["number"].as_u64().unwrap_or(0);
+            let pr_number = payload["number"].as_u64().unwrap_or(0);
             let title = payload["pull_request"]["title"]
                 .as_str()
                 .unwrap_or("unknown");
@@ -110,7 +221,7 @@ fn log_event(event_type: &str, payload: &serde_json::Value) {
             info!(
                 event = event_type,
                 action,
-                pr_number = number,
+                pr_number,
                 title,
                 repo,
                 "Pull request event"

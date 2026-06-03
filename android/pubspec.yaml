@@ -7,10 +7,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  cljd:
-    git:
-      url: https://github.com/Tensegritics/ClojureDart.git
-      path: clj
 
 dev_dependencies:
   flutter_test:

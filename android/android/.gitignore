@@ -12,3 +12,6 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Firebase config — contains API keys; generate from Firebase console or copy from team secrets
+google-services.json

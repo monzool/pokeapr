@@ -1,11 +1,90 @@
 (ns pokeapr.main
   (:require ["package:flutter/material.dart" :as m]
+            ["package:firebase_core/firebase_core.dart" :as fb]
+            ["package:cloud_firestore/cloud_firestore.dart" :as fs]
             [cljd.flutter :as f]))
 
-(defn main []
+;; Firebase options matching the project ID used by the backend.
+;; The projectId must match GOOGLE_CLOUD_PROJECT set when running the backend.
+(def firebase-options
+  (fb/FirebaseOptions
+   .apiKey "fake-api-key-for-emulator"
+   .appId "1:123456789:android:000000000000abcd"
+   .messagingSenderId "123456789"
+   .projectId "pokeapr-dev"
+   .storageBucket "pokeapr-dev.appspot.com"))
+
+(defn event-card [doc]
+  (let [data (.data doc)]
+    (m/Card
+     .margin (m/EdgeInsets.symmetric .horizontal 12.0 .vertical 6.0)
+     .elevation 3.0
+     .child (m/Padding
+             .padding (m/EdgeInsets.all 16.0)
+             .child (m/Column
+                     .crossAxisAlignment m/CrossAxisAlignment.start
+                     .mainAxisSize m/MainAxisSize.min
+                     .children
+                     (filterv some?
+                      [(m/Row
+                        .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+                        .children
+                        (filterv some?
+                         [(m/Chip
+                           .label (m/Text (str (get data "event_type" "unknown"))))
+                          (when-let [action (get data "action")]
+                            (m/Text action
+                                    .style (m/TextStyle .color m/Colors.grey)))]))
+                       (m/SizedBox .height 8.0)
+                       (when-let [title (get data "title")]
+                         (m/Text title
+                                 .style (m/TextStyle .fontWeight m/FontWeight.bold
+                                                     .fontSize 16.0)))
+                       (when-let [repo (get data "repo")]
+                         (m/Text (str "Repo: " repo)
+                                 .style (m/TextStyle .color m/Colors.grey)))
+                       (when-let [author (get data "author")]
+                         (m/Text (str "By: " author)
+                                 .style (m/TextStyle .color m/Colors.grey)))]))))))
+
+(defn events-body []
+  (m/StreamBuilder
+   .stream (-> (fs/FirebaseFirestore.instance)
+               (.collection "github_events")
+               (.orderBy "timestamp" .descending true)
+               (.snapshots))
+   .builder (fn [_ctx snapshot]
+              (cond
+                (.-hasError snapshot)
+                (m/Center
+                 .child (m/Text (str "Error: " (.-error snapshot))))
+
+                (not (.-hasData snapshot))
+                (m/Center .child (m/CircularProgressIndicator))
+
+                :else
+                (let [docs (.-docs (.-data snapshot))]
+                  (if (empty? docs)
+                    (m/Center .child (m/Text "No events yet"))
+                    (m/ListView.builder
+                     .padding (m/EdgeInsets.symmetric .vertical 8.0)
+                     .itemCount (count docs)
+                     .itemBuilder (fn [_ i] (event-card (nth docs i))))))))))
+
+;; Emulator host:
+;;   - Android emulator  → "10.0.2.2"
+;;   - Linux desktop app → "localhost"
+(def emulator-host "10.0.2.2")
+(def emulator-port 8080)
+
+(defn ^:async main []
+  (m/WidgetsFlutterBinding.ensureInitialized)
+  (await (fb/Firebase.initializeApp .options firebase-options))
+  (.useFirestoreEmulator (fs/FirebaseFirestore.instance) emulator-host emulator-port)
   (f/run
     (m/MaterialApp
      .title "Pokeapr"
+     .theme (m/ThemeData .primarySwatch m/Colors.blue)
      .home (m/Scaffold
-            .appBar (m/AppBar .title (m/Text "Pokeapr"))
-            .body (m/Center .child (m/Text "Hello, Pokeapr!"))))))
+            .appBar (m/AppBar .title (m/Text "GitHub Events"))
+            .body (events-body)))))

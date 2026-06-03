@@ -1,0 +1,11 @@
+(ns pokeapr.main
+  (:require ["package:flutter/material.dart" :as m]
+            [cljd.flutter :as f]))
+
+(defn main []
+  (f/run
+    (m/MaterialApp
+     .title "Pokeapr"
+     .home (m/Scaffold
+            .appBar (m/AppBar .title (m/Text "Pokeapr"))
+            .body (m/Center .child (m/Text "Hello, Pokeapr!"))))))

@@ -1,0 +1,20 @@
+name: pokeapr
+description: Pokeapr Android app (ClojureDart)
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cljd:
+    git:
+      url: https://github.com/Tensegritics/ClojureDart.git
+      path: clj
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

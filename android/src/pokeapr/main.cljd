@@ -1,21 +1,31 @@
 (ns pokeapr.main
   (:require ["package:flutter/material.dart" :as m]
+            ["package:flutter/foundation.dart" :as foundation]
             ["package:firebase_core/firebase_core.dart" :as fb]
             ["package:cloud_firestore/cloud_firestore.dart" :as fs]
             [cljd.flutter :as f]))
 
-;; Firebase options matching the project ID used by the backend.
-;; The projectId must match GOOGLE_CLOUD_PROJECT set when running the backend.
+;; Credentials are injected at build time via --dart-define.
+;; For release builds supply real values:
+;;   flutter run --dart-define=FIREBASE_API_KEY=AIza... --dart-define=FIREBASE_APP_ID=1:...
+;; The defaults work against the local Firestore emulator (debug only).
 (def firebase-options
   (fb/FirebaseOptions
-   .apiKey "fake-api-key-for-emulator"
-   .appId "1:123456789:android:000000000000abcd"
-   .messagingSenderId "123456789"
-   .projectId "pokeapr-dev"
-   .storageBucket "pokeapr-dev.appspot.com"))
+   .apiKey (String/fromEnvironment "FIREBASE_API_KEY" .defaultValue "fake-api-key-for-emulator")
+   .appId (String/fromEnvironment "FIREBASE_APP_ID" .defaultValue "1:123456789:android:000000000000abcd")
+   .messagingSenderId (String/fromEnvironment "FIREBASE_MESSAGING_SENDER_ID" .defaultValue "123456789")
+   .projectId (String/fromEnvironment "FIREBASE_PROJECT_ID" .defaultValue "pokeapr-dev")
+   .storageBucket (String/fromEnvironment "FIREBASE_STORAGE_BUCKET" .defaultValue "pokeapr-dev.appspot.com")))
+
+;; Android emulator reaches the host machine via 10.0.2.2;
+;; Web browsers running on the same machine use localhost.
+(def emulator-host (if foundation/kIsWeb "localhost" "10.0.2.2"))
+(def emulator-port 8080)
 
 (defn event-card [doc]
-  (let [data (.data doc)]
+  ;; .data returns a native Dart Map<String,dynamic>; convert to a ClojureDart
+  ;; map so that `get` resolves keys correctly.
+  (let [data (into {} (or (.data doc) {}))]
     (m/Card
      .margin (m/EdgeInsets.symmetric .horizontal 12.0 .vertical 6.0)
      .elevation 3.0
@@ -46,7 +56,6 @@
                        (when-let [author (get data "author")]
                          (m/Text (str "By: " author)
                                  .style (m/TextStyle .color m/Colors.grey)))]))))))
-
 (defn events-body []
   (m/StreamBuilder
    .stream (-> (fs/FirebaseFirestore.instance)
@@ -71,16 +80,13 @@
                      .itemCount (count docs)
                      .itemBuilder (fn [_ i] (event-card (nth docs i))))))))))
 
-;; Emulator host:
-;;   - Android emulator  → "10.0.2.2"
-;;   - Linux desktop app → "localhost"
-(def emulator-host "10.0.2.2")
-(def emulator-port 8080)
-
 (defn ^:async main []
   (m/WidgetsFlutterBinding.ensureInitialized)
   (await (fb/Firebase.initializeApp .options firebase-options))
-  (.useFirestoreEmulator (fs/FirebaseFirestore.instance) emulator-host emulator-port)
+  ;; Only route traffic to the local emulator in debug builds.
+  ;; Release builds connect to the real Firebase project.
+  (when foundation/kDebugMode
+    (.useFirestoreEmulator (fs/FirebaseFirestore.instance) emulator-host emulator-port))
   (f/run
     (m/MaterialApp
      .title "Pokeapr"

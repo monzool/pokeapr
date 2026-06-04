@@ -22,10 +22,19 @@
 (def emulator-host (if foundation/kIsWeb "localhost" "10.0.2.2"))
 (def emulator-port 8080)
 
+(defn action-colors [action]
+  (case action
+    "opened"   {:bg 0xFFE8F5E9 :fg 0xFF2E7D32}
+    "closed"   {:bg 0xFFFFEBEE :fg 0xFFC62828}
+    "reopened" {:bg 0xFFE3F2FD :fg 0xFF1565C0}
+    {:bg 0xFFE8EAF6 :fg 0xFF3949AB}))
+
 (defn event-card [doc]
   ;; .data returns a native Dart Map<String,dynamic>; convert to a ClojureDart
   ;; map so that `get` resolves keys correctly.
-  (let [data (into {} (or (.data doc) {}))]
+  (let [data    (into {} (or (.data doc) {}))
+        action  (get data "action")
+        colors  (action-colors (or action ""))]
     (m/Card
      .margin (m/EdgeInsets.symmetric .horizontal 12.0 .vertical 6.0)
      .elevation 3.0
@@ -40,11 +49,21 @@
                         .mainAxisAlignment m/MainAxisAlignment.spaceBetween
                         .children
                         (filterv some?
-                         [(m/Chip
-                           .label (m/Text (str (get data "event_type" "unknown"))))
-                          (when-let [action (get data "action")]
+                         [(m/Container
+                           .padding (m/EdgeInsets.symmetric .horizontal 8.0 .vertical 4.0)
+                           .decoration (m/BoxDecoration
+                                        .color (m/Color (:bg colors))
+                                        .borderRadius (m/BorderRadius.circular 4.0))
+                           .child (m/Text (str (get data "event_type" "unknown"))
+                                          .style (m/TextStyle
+                                                  .fontSize 12.0
+                                                  .color (m/Color (:fg colors))
+                                                  .fontWeight m/FontWeight.w600)))
+                          (when action
                             (m/Text action
-                                    .style (m/TextStyle .color m/Colors.grey)))]))
+                                    .style (m/TextStyle
+                                            .color (m/Color (:fg colors))
+                                            .fontWeight m/FontWeight.w500)))]))
                        (m/SizedBox .height 8.0)
                        (when-let [title (get data "title")]
                          (m/Text title
